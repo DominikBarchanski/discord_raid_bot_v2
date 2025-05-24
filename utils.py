@@ -1,30 +1,46 @@
+import json
+import asyncio
+from typing import Optional, Dict
+
 import discord
 from discord.ui import View
-from typing import Optional
 
-async def safe_edit_message(message: discord.Message, **kwargs):
-    """Safely edit a Discord message, handling potential errors."""
+# =====================================================
+# Load Templates Function
+# =====================================================
+def load_templates() -> Dict[str, dict]:
     try:
-        await message.edit(**kwargs)
-        return True
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
-        print(f"Error editing message: {e}")
-        return False
-
-async def ephemeral_response(interaction: discord.Interaction, content: str, view: Optional[View] = None, wait_for_user_action: bool = False):
-    """Send an ephemeral response to an interaction."""
-    try:
-        if interaction.response.is_done():
-            if view and wait_for_user_action:
-                await interaction.followup.send(content, view=view, ephemeral=True, wait=True)
-            else:
-                await interaction.followup.send(content, view=view, ephemeral=True)
-        else:
-            if view and wait_for_user_action:
-                await interaction.response.send_message(content, view=view, ephemeral=True, wait=True)
-            else:
-                await interaction.response.send_message(content, view=view, ephemeral=True)
-        return True
+        with open("raid_templates.json", "r", encoding="utf-8") as f:
+            templates = json.load(f)
+        return templates
     except Exception as e:
-        print(f"Error sending ephemeral response: {e}")
-        return False
+        print(f"Error loading raid templates: {e}")
+        return {}
+
+# =====================================================
+# Helper Functions
+# =====================================================
+async def safe_edit_message(message: discord.Message, **kwargs):
+    if message.author.id != message._state.user.id:
+        print("Cannot edit message not authored by the bot.")
+        return
+    if "content" in kwargs and len(kwargs["content"]) > 1900:
+        kwargs["content"] = kwargs["content"][:1900] + "\n...[truncated]"
+    await message.edit(**kwargs)
+
+async def ephemeral_response(interaction: discord.Interaction, content: str, view: Optional[View] = None,
+                         wait_for_user_action: bool = False):
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(content, ephemeral=True, view=view)
+        else:
+            await interaction.followup.send(content, ephemeral=True, view=view)
+    except Exception as e:
+        print("ephemeral_response error:", e)
+    if not wait_for_user_action:
+        await asyncio.sleep(5)
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException as e:
+            if e.code != 10015:
+                print(f"Error deleting ephemeral message: {e}")

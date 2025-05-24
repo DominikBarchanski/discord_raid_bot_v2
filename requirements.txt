@@ -1,4 +1,0 @@
-discord.py>=2.0.0
-flask>=2.0.0
-requests>=2.0.0
-zoneinfo>=0.0.0

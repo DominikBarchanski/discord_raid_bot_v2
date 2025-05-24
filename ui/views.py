@@ -1,479 +1,483 @@
 import discord
 from discord.ui import View, Button
-from typing import Dict, List, Optional
+from typing import List, Optional, Dict
 
-from database import save_raid_to_db
-from utils import ephemeral_response
-from ui.buttons import CloseButton, MapButton, RoleButton, SendListButton, NotifyParticipantsButton
-from ui.dropdowns import ClassDropdown, SPDropdown, PromoteReserveDropdown, RequiredSPDropdown, RoleSelectMenu, RaidTemplateSelectDropdown
+from utils import ephemeral_response, safe_edit_message
+from ui.buttons import CloseButton, NotifyParticipantsButton, SendListButton
+from ui.selects import ClassDropdown, SPDropdown, RoleSelectMenu, RaidTemplateSelectDropdown, PromoteReserveDropdown, RequiredSPDropdown
 
 class ClassSelectionView(View):
     """View for selecting a class."""
-
+    
     def __init__(self, raid, participant_type: str):
-        super().__init__()
+        super().__init__(timeout=None)
+        self.raid = raid
+        self.participant_type = participant_type
         self.add_item(ClassDropdown(raid, participant_type))
         self.add_item(CloseButton())
 
 class SPSelectionView(View):
     """View for selecting a specialization."""
-
+    
     def __init__(self, raid, chosen_class: str, participant_type: str, chosen_sps=None):
-        super().__init__()
+        super().__init__(timeout=None)
         self.raid = raid
         self.chosen_class = chosen_class
         self.participant_type = participant_type
         self.chosen_sps = chosen_sps or []
-
-        # Add SP dropdown
+        
+        # Add dropdown with SP selection
         self.add_item(SPDropdown(raid, chosen_class, self.chosen_sps))
-
-        # Add buttons
-        sign_up_button = Button(style=discord.ButtonStyle.success, label="Sign Up", custom_id="sign_up")
-        sign_up_button.callback = lambda i, b=sign_up_button: self.sign_up(i, b)
-        self.add_item(sign_up_button)
-
-        add_sp_button = Button(style=discord.ButtonStyle.primary, label="Add SP", custom_id="add_sp")
-        add_sp_button.callback = lambda i, b=add_sp_button: self.add_sp(i, b)
-        self.add_item(add_sp_button)
-
-        clear_sp_button = Button(style=discord.ButtonStyle.danger, label="Clear", custom_id="clear_sp")
-        clear_sp_button.callback = lambda i, b=clear_sp_button: self.clear_sp(i, b)
-        self.add_item(clear_sp_button)
-
-        change_class_button = Button(style=discord.ButtonStyle.secondary, label="Change Class", custom_id="change_class")
-        change_class_button.callback = lambda i, b=change_class_button: self.change_class(i, b)
-        self.add_item(change_class_button)
-
+        self.add_item(CloseButton())
+    
+    @discord.ui.button(label="Sign Up", style=discord.ButtonStyle.green)
     async def sign_up(self, interaction: discord.Interaction, button: Button):
         """Handle sign up button click."""
         if not self.chosen_sps:
-            await interaction.response.send_message("Please select at least one specialization.", ephemeral=True)
+            # Use ephemeral message
+            await ephemeral_response(interaction, "Please select at least one SP before signing up.")
             return
-
-        # Add participant to raid
-        success, message = self.raid.add_participant(
-            user=interaction.user,
-            sp=self.chosen_sps[0],  # Use the first selected SP
-            desired_type=self.participant_type,
-            ignore_required=False
+        
+        user = interaction.user
+        # Detect level_offset based on roles
+        level_offset = 0
+        # If user has "c90" role, set +90
+        if any(r.name == "c90" for r in user.roles):
+            level_offset = 90
+        # If user has "c1-89" role, set -90
+        elif any(r.name == "c1-89" for r in user.roles):
+            level_offset = -90
+        # Handle case where user has neither role
+        else:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "Nie posiadasz roli c90 ani c1-89. Wybierz role #💬-role")
+            return
+        
+        sp_string = ", ".join(self.chosen_sps)
+        success = self.raid.add_participant(
+            user,
+            sp_string,
+            self.participant_type,
+            ignore_required=True,
+            level_offset=level_offset
         )
-
-        if success:
-            # Update the raid message
-            await self.raid.raid_message.edit(content=self.raid.format_raid_list(), view=RaidManagementView(self.raid))
-
-            # Save the raid to the database
-            save_raid_to_db(self.raid)
-
-        # Disable all components
-        for item in self.children:
-            item.disabled = True
-
-        await interaction.response.edit_message(content=message, view=self)
-
+        
+        if success and self.raid.raid_message:
+            await safe_edit_message(self.raid.raid_message, content=self.raid.format_raid_list())
+            try:
+                # Use ephemeral message (auto-delete)
+                await interaction.response.edit_message(delete_after=5)
+            except discord.HTTPException:
+                pass
+        else:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "Sign-up failed.")
+    
+    @discord.ui.button(label="Add Another SP", style=discord.ButtonStyle.blurple)
     async def add_sp(self, interaction: discord.Interaction, button: Button):
-        """Handle add SP button click."""
-        if not self.chosen_sps:
-            await interaction.response.send_message("Please select at least one specialization.", ephemeral=True)
-            return
-
-        # Add participant to raid
-        success, message = self.raid.add_participant(
-            user=interaction.user,
-            sp=self.chosen_sps[0],  # Use the first selected SP
-            desired_type=self.participant_type,
-            ignore_required=False
+        """Handle add another SP button click."""
+        # Use ephemeral message
+        await interaction.response.edit_message(
+            content="Pick another SP:",
+            view=SPSelectionView(self.raid, self.chosen_class, self.participant_type, self.chosen_sps)
         )
-
-        if success:
-            # Update the raid message
-            await self.raid.raid_message.edit(content=self.raid.format_raid_list(), view=RaidManagementView(self.raid))
-
-            # Save the raid to the database
-            save_raid_to_db(self.raid)
-
-        await interaction.response.send_message(message, ephemeral=True)
-
+    
+    @discord.ui.button(label="Clear Selection", style=discord.ButtonStyle.red)
     async def clear_sp(self, interaction: discord.Interaction, button: Button):
-        """Handle clear SP button click."""
-        self.chosen_sps = []
-        await interaction.response.edit_message(content="Cleared selections. Please select specializations again.", view=self)
-
+        """Handle clear selection button click."""
+        self.chosen_sps.clear()
+        # Use ephemeral message
+        await interaction.response.edit_message(
+            content="SP cleared. Pick again:",
+            view=SPSelectionView(self.raid, self.chosen_class, self.participant_type)
+        )
+    
+    @discord.ui.button(label="Change Class", style=discord.ButtonStyle.secondary)
     async def change_class(self, interaction: discord.Interaction, button: Button):
         """Handle change class button click."""
-        await interaction.response.edit_message(content="Please select a class:", view=ClassSelectionView(self.raid, self.participant_type))
+        # Use ephemeral message
+        await interaction.response.edit_message(
+            content="Select class again:",
+            view=ClassSelectionView(self.raid, self.participant_type)
+        )
 
 class RemoveAltView(View):
     """View for removing an alt."""
-
+    
     def __init__(self, raid, user_id: int):
-        super().__init__()
+        super().__init__(timeout=30)
         self.raid = raid
         self.user_id = user_id
-
-        # Get all alts for this user
-        if user_id in raid.participants:
-            alts = [p for p in raid.participants[user_id] if p.participant_type == "alt"]
-
-            # Add a button for each alt
-            for alt in alts:
-                button = Button(style=discord.ButtonStyle.danger, label=f"Remove {alt.sp}", custom_id=f"remove_alt_{alt.sp}")
-                button.callback = self.generate_callback(alt.sp)
-                self.add_item(button)
-
-        # Add close button
+        self.mapping = {}
+        alt_entries = [p for p in raid.participants if p.user_id == user_id and (
+            p.participant_type == "ALT" or (p.participant_type == "RESERVE" and p.reserve_for == "ALT")
+        )]
+        for i, p in enumerate(alt_entries):
+            custom_id = f"remove_alt_{i}"
+            self.mapping[custom_id] = p.sp
+            btn = Button(label=f"Remove {p.sp}", style=discord.ButtonStyle.danger, custom_id=custom_id)
+            btn.callback = self.generate_callback(custom_id)
+            self.add_item(btn)
         self.add_item(CloseButton())
-
+    
     def generate_callback(self, custom_id: str):
-        """Generate a callback for a button."""
+        """Generate callback for remove alt button."""
         async def callback(interaction: discord.Interaction):
-            # Remove the alt
-            success, message = self.raid.remove_alt_by_sp(self.user_id, custom_id)
-
-            if success:
-                # Update the raid message
-                await self.raid.raid_message.edit(content=self.raid.format_raid_list(), view=RaidManagementView(self.raid))
-
-                # Save the raid to the database
-                save_raid_to_db(self.raid)
-
-            # Disable all components
-            for item in self.children:
-                item.disabled = True
-
-            await interaction.response.edit_message(content=message, view=self)
-
+            if interaction.user != self.raid.creator and interaction.user.id != self.user_id:
+                # Use ephemeral message
+                await ephemeral_response(interaction, "Only the raid leader or the owner can remove roles.")
+                return
+            
+            sp_to_remove = self.mapping.get(custom_id)
+            if sp_to_remove is None:
+                # Use ephemeral message
+                await ephemeral_response(interaction, "Role not found.")
+                return
+            
+            removed = self.raid.remove_alt_by_sp(self.user_id, sp_to_remove)
+            if removed:
+                # Use ephemeral message
+                await ephemeral_response(interaction, "Role removed.")
+                await safe_edit_message(
+                    self.raid.raid_message,
+                    content=self.raid.format_raid_list(),
+                    view=RaidManagementView(self.raid)
+                )
+            else:
+                # Use ephemeral message
+                await ephemeral_response(interaction, "Failed to remove role.")
+        
         return callback
 
 class RemoveUserView(View):
     """View for removing a user."""
-
+    
     def __init__(self, raid, remover: discord.Member):
-        super().__init__()
+        super().__init__(timeout=30)
         self.raid = raid
         self.remover = remover
-
-        # Add a button for each participant
-        for user_id in raid.participants:
-            user = raid.bot.get_user(user_id)
-            if user:
-                button = Button(style=discord.ButtonStyle.danger, label=f"Remove {user.display_name}", custom_id=f"remove_user_{user_id}")
-                button.callback = lambda i, b=button: self.remove_user(i, b)
-                self.add_item(button)
-
-        # Add close button
+        for i, p in enumerate(raid.participants):
+            mem = raid.guild.get_member(p.user_id)
+            disp_name = mem.display_name if mem else f"User-{p.user_id}"
+            t = p.participant_type
+            if t == "RESERVE":
+                t += f"({p.reserve_for})"
+            label_txt = f"{disp_name} [{t}] {p.sp}"
+            btn = Button(label=label_txt, style=discord.ButtonStyle.danger, custom_id=f"remove_user_{p.user_id}_{i}")
+            self.add_item(btn)
         self.add_item(CloseButton())
-
+    
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Check if the user can interact with this view."""
-        # Only the remover or raid creator can use this view
-        if interaction.user.id != self.remover.id and interaction.user.id != self.raid.creator.id:
-            await interaction.response.send_message("You cannot use this view.", ephemeral=True)
+        """Check if interaction is valid."""
+        if interaction.user != self.raid.creator:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "Only the raid leader can remove others.")
             return False
-
-        # Check if the remover has permission to remove other users
-        if interaction.user.id != self.raid.creator.id and not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("You don't have permission to remove other users.", ephemeral=True)
-            return False
-
-        return True
-
-    async def remove_user(self, interaction: discord.Interaction, button: Button):
-        """Handle remove user button click."""
-        user_id = int(button.custom_id.split("_")[-1])
-
-        # Remove the user
-        success, message = self.raid.remove_participant(user_id, self.remover)
-
-        if success:
-            # Update the raid message
-            await self.raid.raid_message.edit(content=self.raid.format_raid_list(), view=RaidManagementView(self.raid))
-
-            # Save the raid to the database
-            save_raid_to_db(self.raid)
-
-        # Disable all components
-        for item in self.children:
-            item.disabled = True
-
-        await interaction.response.edit_message(content=message, view=self)
+        
+        cid = interaction.data.get("custom_id")
+        if cid and cid.startswith("remove_user_"):
+            parts = cid.split("_")
+            if len(parts) >= 3:
+                try:
+                    user_id = int(parts[2])
+                except ValueError:
+                    return False
+                
+                await self.raid.remove_participant(user_id, remover=self.remover)
+                # Use ephemeral message
+                await ephemeral_response(interaction, "User removed.")
+                return True
+        
+        return False
 
 class PromoteReserveDropdownView(View):
-    """View for promoting a reserve player."""
-
+    """View for promoting a user from reserve."""
+    
     def __init__(self, raid):
-        super().__init__()
+        super().__init__(timeout=30)
         self.raid = raid
-
-        # Add dropdown
         self.add_item(PromoteReserveDropdown(raid))
-
-        # Add close button
         self.add_item(CloseButton())
 
 class RequiredSPDropdownView(View):
     """View for selecting a required SP."""
-
+    
     def __init__(self, raid):
-        super().__init__()
+        super().__init__(timeout=30)
         self.raid = raid
-
-        # Add dropdown
         self.add_item(RequiredSPDropdown(raid))
-
-        # Add close button
         self.add_item(CloseButton())
-
-class TemplateOrganizerView(View):
-    """View for organizing a raid template."""
-
-    def __init__(self, raid, template_name: str, template_data: dict):
-        super().__init__()
-        self.raid = raid
-        self.template_name = template_name
-        self.template_data = template_data
-        self.selected_map = None
-        self.selected_roles = []
-        self.role_assignments = {}
-
-        # Add map buttons
-        for map_name in template_data.get("maps", []):
-            self.add_item(MapButton(map_name, self))
-
-        # Add role buttons
-        for role_name in template_data.get("roles", []):
-            self.add_item(RoleButton(role_name, self))
-
-        # Add send list button
-        self.add_item(SendListButton(self))
-
-        # Add close button
-        self.add_item(CloseButton())
-
-    def update_role_buttons(self):
-        """Update the role buttons based on selection."""
-        for item in self.children:
-            if isinstance(item, RoleButton):
-                if item.role_name in self.selected_roles:
-                    item.style = discord.ButtonStyle.success
-                else:
-                    item.style = discord.ButtonStyle.secondary
-
-    def get_preview(self):
-        """Get a preview of the template."""
-        lines = []
-
-        if self.selected_map:
-            lines.append(f"**Map: {self.selected_map}**")
-
-        if self.selected_roles:
-            lines.append("\n**Roles:**")
-            for role in self.selected_roles:
-                lines.append(f"- {role}")
-
-        return "\n".join(lines)
-
-    async def update_preview(self, interaction: discord.Interaction):
-        """Update the preview."""
-        await interaction.response.edit_message(content=self.get_preview(), view=self)
 
 class RaidTemplateSelectView(View):
     """View for selecting a raid template."""
-
+    
     def __init__(self, raid, templates: Dict[str, dict]):
-        super().__init__()
+        super().__init__(timeout=60)
         self.raid = raid
         self.templates = templates
-
-        # Add dropdown
-        options = [discord.SelectOption(label=name) for name in templates.keys()]
+        options = [discord.SelectOption(label=name, value=name) for name in templates.keys()]
         self.add_item(RaidTemplateSelectDropdown(options))
-
-        # Add close button
         self.add_item(CloseButton())
+
+class TemplateOrganizerView(View):
+    """View for organizing a template."""
+    
+    def __init__(self, raid, template_name: str, template_data: dict):
+        super().__init__(timeout=300)
+        self.raid = raid
+        self.template_name = template_name
+        self.template_data = template_data
+        self.assignments = {}
+        self.selected_map = None
+        self.selected_roles = []
+        
+        # Add map buttons if available
+        if "maps" in self.template_data:
+            maps = list(self.template_data["maps"].keys())
+            self.selected_map = maps[0]
+            for map_name in maps:
+                self.add_item(Button(label=map_name, style=discord.ButtonStyle.primary, custom_id=f"map_{map_name}"))
+        
+        # Add role buttons
+        self.update_role_buttons()
+        
+        # Add send list button
+        self.add_item(SendListButton(self))
+        self.add_item(CloseButton())
+    
+    def update_role_buttons(self):
+        """Update role buttons based on selected map."""
+        # Remove existing role buttons
+        items_to_remove = [item for item in self.children if hasattr(item, "custom_id") and item.custom_id.startswith("role_")]
+        for item in items_to_remove:
+            self.remove_item(item)
+        
+        # Add new role buttons
+        if self.selected_map and "maps" in self.template_data:
+            roles = list(self.template_data["maps"][self.selected_map].keys())
+        elif "placeholders" in self.template_data:
+            roles = list(self.template_data["placeholders"].keys())
+        else:
+            roles = []
+        
+        for role in roles:
+            btn = Button(
+                label=role,
+                style=discord.ButtonStyle.success if role in self.selected_roles else discord.ButtonStyle.secondary,
+                custom_id=f"role_{role}"
+            )
+            self.add_item(btn)
+    
+    def get_preview(self) -> str:
+        """Get preview of template assignments."""
+        preview = f"Template **{self.template_name}** assignments preview (leader view):\n"
+        for role, data in self.assignments.items():
+            preview += f"**{role}**: {data['display']}\n"
+        return preview
+    
+    async def update_preview(self, interaction: discord.Interaction):
+        """Update preview of template assignments."""
+        content = self.get_preview()
+        # Use ephemeral message
+        await interaction.response.edit_message(content=content, view=self)
 
 class RaidManagementView(View):
     """View for managing a raid."""
-
+    
     def __init__(self, raid):
-        super().__init__(timeout=None)  # No timeout for raid management views
+        super().__init__(timeout=None)
         self.raid = raid
-
-        # Add buttons
-        join_main_button = Button(style=discord.ButtonStyle.primary, label="Join as Main", custom_id="join_main")
-        join_main_button.callback = lambda i, b=join_main_button: self.join_main(i, b)
-        self.add_item(join_main_button)
-
-        if raid.allow_alts:
-            join_alt_button = Button(style=discord.ButtonStyle.secondary, label="Join as Alt", custom_id="join_alt")
-            join_alt_button.callback = lambda i, b=join_alt_button: self.join_alt(i, b)
-            self.add_item(join_alt_button)
-
-        sign_out_button = Button(style=discord.ButtonStyle.danger, label="Sign Out", custom_id="sign_out")
-        sign_out_button.callback = lambda i, b=sign_out_button: self.sign_out_all(i, b)
-        self.add_item(sign_out_button)
-
-        remove_alt_button = Button(style=discord.ButtonStyle.danger, label="Remove Alt", custom_id="remove_alt")
-        remove_alt_button.callback = lambda i, b=remove_alt_button: self.remove_single_alt(i, b)
-        self.add_item(remove_alt_button)
-
-        notify_button = Button(style=discord.ButtonStyle.primary, label="Notify", custom_id="notify")
-        notify_button.callback = lambda i, b=notify_button: self.notify_participants(i, b)
-        self.add_item(notify_button)
-
-        # Add admin buttons in a new row
-        remove_user_button = Button(style=discord.ButtonStyle.danger, label="Remove User", custom_id="remove_user", row=1)
-        remove_user_button.callback = lambda i, b=remove_user_button: self.remove_any_user(i, b)
-        self.add_item(remove_user_button)
-
-        delete_raid_button = Button(style=discord.ButtonStyle.danger, label="Delete Raid", custom_id="delete_raid", row=1)
-        delete_raid_button.callback = lambda i, b=delete_raid_button: self.delete_raid(i, b)
-        self.add_item(delete_raid_button)
-
-        promote_next_button = Button(style=discord.ButtonStyle.success, label="Promote Next", custom_id="promote_next", row=1)
-        promote_next_button.callback = lambda i, b=promote_next_button: self.promote_next_fifo(i, b)
-        self.add_item(promote_next_button)
-
-        promote_pick_button = Button(style=discord.ButtonStyle.success, label="Promote Pick", custom_id="promote_pick", row=1)
-        promote_pick_button.callback = lambda i, b=promote_pick_button: self.promote_pick_reserve(i, b)
-        self.add_item(promote_pick_button)
-
+    
+    @discord.ui.button(label="Join (Main)", style=discord.ButtonStyle.green, row=0, custom_id="raidmgmt_join_main")
     async def join_main(self, interaction: discord.Interaction, button: Button):
-        """Handle join as main button click."""
-        await interaction.response.send_message("Please select a class:", view=ClassSelectionView(self.raid, "main"), ephemeral=True)
-
+        """Handle join main button click."""
+        try:
+            if not interaction.response.is_done():
+                # Use ephemeral message
+                await interaction.response.send_message(
+                    "Select class for MAIN:",
+                    ephemeral=True,
+                    view=ClassSelectionView(self.raid, "MAIN")
+                )
+            else:
+                # Use ephemeral message
+                await interaction.followup.send(
+                    "Select class for MAIN:",
+                    ephemeral=True,
+                    view=ClassSelectionView(self.raid, "MAIN")
+                )
+        except discord.errors.NotFound:
+            # Use ephemeral message
+            await interaction.followup.send(
+                "Select class for MAIN:",
+                ephemeral=True,
+                view=ClassSelectionView(self.raid, "MAIN")
+            )
+    
+    @discord.ui.button(label="Sign Up (Alt)", style=discord.ButtonStyle.green, row=0, custom_id="raidmgmt_join_alt")
     async def join_alt(self, interaction: discord.Interaction, button: Button):
-        """Handle join as alt button click."""
-        await interaction.response.send_message("Please select a class:", view=ClassSelectionView(self.raid, "alt"), ephemeral=True)
-
+        """Handle join alt button click."""
+        # Use ephemeral message
+        await interaction.response.send_message(
+            "Select class for ALT:",
+            ephemeral=True,
+            view=ClassSelectionView(self.raid, "ALT")
+        )
+    
+    @discord.ui.button(label="Sign Out (All)", style=discord.ButtonStyle.red, row=0, custom_id="raidmgmt_sign_out_all")
     async def sign_out_all(self, interaction: discord.Interaction, button: Button):
-        """Handle sign out button click."""
-        success, message = self.raid.remove_participant(interaction.user.id)
-
-        if success:
-            # Update the raid message
-            await self.raid.raid_message.edit(content=self.raid.format_raid_list(), view=self)
-
-            # Save the raid to the database
-            save_raid_to_db(self.raid)
-
-        await interaction.response.send_message(message, ephemeral=True)
-
+        """Handle sign out all button click."""
+        uid = interaction.user.id
+        removed = await self.raid.remove_participant(uid, remover=interaction.user)
+        if removed and self.raid.raid_message:
+            await safe_edit_message(self.raid.raid_message, content=self.raid.format_raid_list())
+        
+        msg = "You were removed from the raid." if removed else "You're not in this raid."
+        # Use ephemeral message
+        await ephemeral_response(interaction, msg)
+    
+    @discord.ui.button(label="Remove Single Alt", style=discord.ButtonStyle.gray, row=1, custom_id="raidmgmt_remove_single_alt")
     async def remove_single_alt(self, interaction: discord.Interaction, button: Button):
-        """Handle remove alt button click."""
-        if interaction.user.id not in self.raid.participants:
-            await interaction.response.send_message("You are not in this raid.", ephemeral=True)
+        """Handle remove single alt button click."""
+        uid = interaction.user.id
+        alt_entries = [p for p in self.raid.participants if p.user_id == uid and (
+            p.participant_type == "ALT" or (p.participant_type == "RESERVE" and p.reserve_for == "ALT")
+        )]
+        
+        if not alt_entries:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "You have no ALTs in this raid.")
             return
-
-        # Check if user has any alts
-        alts = [p for p in self.raid.participants[interaction.user.id] if p.participant_type == "alt"]
-        if not alts:
-            await interaction.response.send_message("You don't have any alts in this raid.", ephemeral=True)
-            return
-
-        # Show alt removal view
-        await interaction.response.send_message("Select an alt to remove:", view=RemoveAltView(self.raid, interaction.user.id), ephemeral=True)
-
+        
+        # Use ephemeral message
+        await interaction.response.send_message(
+            "Remove one of your ALTs:",
+            ephemeral=True,
+            view=RemoveAltView(self.raid, uid)
+        )
+    
+    @discord.ui.button(label="Notify Participants", style=discord.ButtonStyle.primary, row=0, custom_id="raidmgmt_notify")
     async def notify_participants(self, interaction: discord.Interaction, button: Button):
-        """Handle notify button click."""
-        # Add the notify participants button to a new view
-        view = View()
-        view.add_item(NotifyParticipantsButton())
-        view.add_item(CloseButton())
-        view.raid = self.raid
-
-        await interaction.response.send_message("Notify participants?", view=view, ephemeral=True)
-
+        """Handle notify participants button click."""
+        # Use the NotifyParticipantsButton callback
+        notify_button = NotifyParticipantsButton()
+        notify_button.view = self
+        await notify_button.callback(interaction)
+    
+    @discord.ui.button(label="Remove Any User", style=discord.ButtonStyle.blurple, row=1, custom_id="raidmgmt_remove_any_user")
     async def remove_any_user(self, interaction: discord.Interaction, button: Button):
-        """Handle remove user button click."""
-        # Check if user is the raid creator or has manage messages permission
-        if interaction.user.id != self.raid.creator.id and not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("You don't have permission to remove other users.", ephemeral=True)
+        """Handle remove any user button click."""
+        if interaction.user != self.raid.creator:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "Only the raid leader can remove others!")
             return
-
-        # Show user removal view
-        await interaction.response.send_message("Select a user to remove:", view=RemoveUserView(self.raid, interaction.user), ephemeral=True)
-
+        
+        # Use ephemeral message
+        await interaction.response.send_message(
+            "Select a participant to remove:",
+            ephemeral=True,
+            view=RemoveUserView(self.raid, remover=interaction.user)
+        )
+    
+    @discord.ui.button(label="Delete Raid", style=discord.ButtonStyle.danger, row=1, custom_id="raidmgmt_delete_raid")
     async def delete_raid(self, interaction: discord.Interaction, button: Button):
         """Handle delete raid button click."""
-        # Check if user is the raid creator or has manage messages permission
-        if interaction.user.id != self.raid.creator.id and not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("You don't have permission to delete this raid.", ephemeral=True)
+        if interaction.user != self.raid.creator:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "Only the raid creator can delete this raid.")
             return
-
-        # Create confirmation view
-        view = View()
-
-        confirm_button = Button(style=discord.ButtonStyle.danger, label="Confirm Delete", custom_id="confirm_delete")
-
-        async def confirm_callback(confirm_interaction: discord.Interaction):
-            # Delete the raid
-            channel_id = self.raid.channel_id
-            guild_id = self.raid.guild_id
-
-            # Remove from bot's raids
-            if channel_id in self.raid.bot.raids:
-                del self.raid.bot.raids[channel_id]
-
-            # Remove from database
-            from database import remove_raid_from_db
-            remove_raid_from_db(channel_id, guild_id)
-
-            # Delete the raid message
+        
+        channel = self.raid.bot.get_channel(self.raid.channel_id)
+        if channel:
+            # Send direct messages to participants (ephemeral-like)
+            for p in self.raid.participants:
+                member = self.raid.guild.get_member(p.user_id)
+                if member:
+                    try:
+                        await member.send(f"Raid **{self.raid.raid_name}** has been cancelled.")
+                    except Exception as e:
+                        print(f"Error sending cancellation DM to {member}: {e}")
+            
+            # Also send to channel for reference
+            mentions = []
+            for p in self.raid.participants:
+                member = self.raid.guild.get_member(p.user_id)
+                if member:
+                    mentions.append(member.mention)
+                else:
+                    mentions.append(f"<@{p.user_id}>")
+            
+            if mentions:
+                cancel_message = "This raid has been cancelled: " + " ".join(mentions)
+                await channel.send(cancel_message)
+        
+        # Import here to avoid circular imports
+        from db import remove_raid_from_db
+        
+        try:
+            del self.raid.bot.raids[self.raid.channel_id]
+        except KeyError:
+            pass
+        
+        remove_raid_from_db(self.raid.channel_id, self.raid.guild.id)
+        
+        if self.raid.raid_message:
             try:
                 await self.raid.raid_message.delete()
-            except:
+            except discord.HTTPException:
                 pass
-
-            # Disable all components
-            for item in view.children:
-                item.disabled = True
-
-            await confirm_interaction.response.edit_message(content="Raid deleted.", view=view)
-
-        confirm_button.callback = confirm_callback
-        view.add_item(confirm_button)
-        view.add_item(CloseButton())
-
-        await interaction.response.send_message(f"Are you sure you want to delete the raid **{self.raid.raid_name}**?", view=view, ephemeral=True)
-
+        
+        await self.raid.delete_all_tracked_messages()
+        
+        # Use ephemeral message
+        await ephemeral_response(interaction, "Raid deleted and all participants have been notified.")
+    
+    @discord.ui.button(label="Promote Next (FIFO)", style=discord.ButtonStyle.gray, row=2, custom_id="raidmgmt_promote_next_fifo")
     async def promote_next_fifo(self, interaction: discord.Interaction, button: Button):
-        """Handle promote next button click."""
-        # Check if user is the raid creator or has manage messages permission
-        if interaction.user.id != self.raid.creator.id and not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("You don't have permission to promote reserves.", ephemeral=True)
+        """Handle promote next FIFO button click."""
+        if interaction.user != self.raid.creator:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "Only the raid creator can force-promote!")
             return
-
-        # Promote the next reserve
-        success, message = self.raid.force_promote_next_reserve()
-
-        if success:
-            # Update the raid message
-            await self.raid.raid_message.edit(content=self.raid.format_raid_list(), view=self)
-
-            # Save the raid to the database
-            save_raid_to_db(self.raid)
-
-        await interaction.response.send_message(message, ephemeral=True)
-
+        
+        promoted_user = self.raid.force_promote_next_reserve()
+        if promoted_user and self.raid.raid_message:
+            await safe_edit_message(self.raid.raid_message, content=self.raid.format_raid_list())
+            
+            # Send direct message to promoted user (ephemeral-like)
+            member = self.raid.guild.get_member(promoted_user)
+            if member:
+                try:
+                    await member.send(f"You have been promoted from reserve in raid **{self.raid.raid_name}**!")
+                except Exception as e:
+                    print(f"Error sending promotion DM to {member}: {e}")
+            
+            # Also send to channel for reference
+            channel = self.raid.bot.get_channel(self.raid.channel_id)
+            if channel:
+                await channel.send(f"<@{promoted_user}> has been promoted from reserve!")
+        
+        msg = f"Promoted <@{promoted_user}> from reserve!" if promoted_user else "No valid Reserve participant to promote."
+        # Use ephemeral message
+        await ephemeral_response(interaction, msg)
+    
+    @discord.ui.button(label="Promote from Reserve (Pick)", style=discord.ButtonStyle.gray, row=2, custom_id="raidmgmt_promote_pick_reserve")
     async def promote_pick_reserve(self, interaction: discord.Interaction, button: Button):
-        """Handle promote pick button click."""
-        # Check if user is the raid creator or has manage messages permission
-        if interaction.user.id != self.raid.creator.id and not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("You don't have permission to promote reserves.", ephemeral=True)
+        """Handle promote pick reserve button click."""
+        if interaction.user != self.raid.creator:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "Only the raid creator can force-promote!")
             return
-
-        # Check if there are any reserves
-        reserves_exist = False
-        for participants in self.raid.participants.values():
-            if any(p.participant_type == "reserve" for p in participants):
-                reserves_exist = True
-                break
-
-        if not reserves_exist:
-            await interaction.response.send_message("No reserves to promote.", ephemeral=True)
+        
+        reserves = [p for p in self.raid.participants if p.participant_type == "RESERVE"]
+        if not reserves:
+            # Use ephemeral message
+            await ephemeral_response(interaction, "No one is on Reserve!")
             return
-
-        # Show reserve promotion view
-        await interaction.response.send_message("Select a reserve to promote:", view=PromoteReserveDropdownView(self.raid), ephemeral=True)
+        
+        # Use ephemeral message
+        await interaction.response.send_message(
+            "Pick a user from Reserve to promote:",
+            ephemeral=True,
+            view=PromoteReserveDropdownView(self.raid)
+        )
