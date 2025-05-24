@@ -361,7 +361,9 @@ class RaidManagementView(View):
         """Handle notify participants button click."""
         # Use the NotifyParticipantsButton callback
         notify_button = NotifyParticipantsButton()
-        notify_button.view = self
+        if hasattr(self, 'raid_message') and self.raid_message:
+            await self.raid_message.edit(view=self)
+
         await notify_button.callback(interaction)
     
     @discord.ui.button(label="Remove Any User", style=discord.ButtonStyle.blurple, row=1, custom_id="raidmgmt_remove_any_user")
